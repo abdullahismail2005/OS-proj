@@ -375,8 +375,15 @@ void handle_entity_death(GameState *gs, Entity *dead) {
 
     if (!dead->is_player) {
         gs->enemies_killed++;
-        // Weapon drop? 60% chance a random non-artifact weapon drops.
-        if (rand_range(0, 99) < 60) {
+        // Spec §6: "If an NPC holds a weapon, the weapon will not be
+        // dropped when it dies." So drops only happen for empty-inventory
+        // enemies; otherwise the carried weapons stay with the corpse.
+        bool has_weapons = false;
+        for (int i = 0; i < INVENTORY_SIZE; ++i) {
+            if (dead->inv_slot[i] != W_NONE) { has_weapons = true; break; }
+        }
+        // 60% chance (unchanged) to drop a random non-artifact weapon.
+        if (!has_weapons && rand_range(0, 99) < 60) {
             int pool[] = {W_IRON_HALBERD, W_VENOM_DAGGER, W_THUNDERSTAFF,
                           W_OBSIDIAN_AXE, W_FROSTBOW, W_SPLINTER_STICK};
             int wid = pool[rand_range(0, (int)(sizeof(pool)/sizeof(pool[0])) - 1)];
@@ -504,15 +511,21 @@ void apply_action(GameState *gs, Entity *actor) {
         return;   // preserve half-stamina (skip behaviour)
     }
     case ACT_ULTIMATE: {
-        // Require Solar Core + Lunar Blade held.
-        int sc = artifact_index(gs, W_SOLAR_CORE);
-        int lb = artifact_index(gs, W_LUNAR_BLADE);
-        int gid = entity_global_id(actor->is_player, actor->local_id);
-        bool has_both = (sc >= 0 && gs->artifacts[sc].held_by_global == gid)
-                     && (lb >= 0 && gs->artifacts[lb].held_by_global == gid);
-        if (!has_both) {
-            shm_log(gs, "[ULT] %s attempted Ultimate without both artifacts",
-                    actor->name);
+        // Spec §10: "Ultimate Ability Eligibility: a player character may
+        // only trigger the Ultimate Ability if both the Solar Core and the
+        // Lunar Blade are present in their active primary inventory
+        // simultaneously." So we check inventory directly (not just the
+        // resource-table lock) — this is the authoritative check.
+        bool has_solar = false, has_lunar = false;
+        for (int i = 0; i < INVENTORY_SIZE; ++i) {
+            if (!actor->inv_head[i]) continue;
+            if (actor->inv_slot[i] == W_SOLAR_CORE)  has_solar = true;
+            if (actor->inv_slot[i] == W_LUNAR_BLADE) has_lunar = true;
+        }
+        if (!has_solar || !has_lunar) {
+            shm_log(gs,
+                "[ULT] %s attempted Ultimate without both artifacts (SC=%d LB=%d)",
+                actor->name, has_solar, has_lunar);
             break;
         }
         shm_log(gs, "[ULT] %s triggers Ultimate — ASP paused 10s",
