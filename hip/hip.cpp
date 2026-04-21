@@ -221,7 +221,7 @@ void player_turn(GameState *gs, Entity *p) {
     // Handle pending drop pickup prompt first if offered to this player.
     pthread_mutex_lock(&gs->state_mutex);
     bool pending_drop = (gs->pending_drop_weapon != W_NONE &&
-                         gs->pending_drop_for_player == p->local_id);
+                         gs->pending_drop_open);
     int drop_w = gs->pending_drop_weapon;
     pthread_mutex_unlock(&gs->state_mutex);
     if (pending_drop) {
@@ -233,10 +233,12 @@ void player_turn(GameState *gs, Entity *p) {
         return;
     }
 
-    char lbl[96];
-    snprintf(lbl, sizeof(lbl), "P%d turn: (s)trike (x)exhaust (w)pn (i)swap (h)eal (u)lt (k)skip (q)uit",
+    char lbl[160];
+    snprintf(lbl, sizeof(lbl),
+             "P%d turn: (s)trike (x)exhaust (w)pn (i)swap (h)eal (u)lt "
+             "(a)cquire (r)elease (k)skip (q)uit",
              p->local_id + 1);
-    int c = prompt_choice(lbl, "sxwihukq");
+    int c = prompt_choice(lbl, "sxwihuarkq");
     switch (c) {
     case 's': {
         p->pending_action = ACT_STRIKE;
@@ -286,6 +288,19 @@ void player_turn(GameState *gs, Entity *p) {
     case 'u':
         p->pending_action = ACT_ULTIMATE;
         break;
+    case 'a': {
+        // Acquire artifact: 1=Solar Core, 2=Lunar Blade, 3=Eclipse Relic.
+        int idx = prompt_int("Artifact to acquire (1=SolarCore 2=LunarBlade 3=Eclipse): ", 1, NUM_ARTIFACTS) - 1;
+        p->pending_action = ACT_ACQUIRE;
+        p->action_target  = idx;
+        break;
+    }
+    case 'r': {
+        int idx = prompt_int("Artifact to release (1/2/3): ", 1, NUM_ARTIFACTS) - 1;
+        p->pending_action = ACT_RELEASE;
+        p->action_target  = idx;
+        break;
+    }
     case 'q':
         // Quit condition: send SIGTERM to arbiter and submit a skip.
         if (gs->arbiter_pid > 0) kill(gs->arbiter_pid, SIGTERM);

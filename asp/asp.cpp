@@ -85,10 +85,44 @@ void install_signals() {
     signal(SIGPIPE, SIG_IGN);
 }
 
-// Simple heuristic NPC decision.
+// Simple heuristic NPC decision. Priorities:
+//   1. If there's a pending weapon drop open, try to pick it up.
+//   2. If a free artifact is present and we don't already hold it, try to
+//      acquire it (this is what exercises the deadlock detector in demos).
+//   3. Otherwise strike a random alive player (85%) or skip (15%).
 void npc_decide(GameState *gs, Entity *e) {
     pthread_mutex_lock(&gs->state_mutex);
-    // Pick a random alive player as target.
+
+    int gid = entity_global_id(0, e->local_id);
+
+    // (1) Dropped weapon pickup: NPCs won't compete with players for the
+    // drop — the scheduler expires open drops onto enemies automatically.
+
+    // (2) Artifact grabs
+    for (int i = 0; i < NUM_ARTIFACTS; ++i) {
+        const ArtifactSlot &a = gs->artifacts[i];
+        if (!a.present) continue;
+        if (a.held_by_global == gid) continue;                // already ours
+        // Attempt to acquire unheld OR (rarely) the held one (creates a wait).
+        if (a.held_by_global < 0 && rand_range(0, 99) < 40) {
+            e->pending_action = ACT_ACQUIRE;
+            e->action_target  = i;
+            pthread_mutex_unlock(&gs->state_mutex);
+            return;
+        }
+        if (a.held_by_global >= 0 && rand_range(0, 99) < 12) {
+            // Contend for an artifact a player/other NPC holds — this is the
+            // textbook "circular wait" setup. Our res_try_acquire will
+            // register us as a waiter; if two entities mutually wait, the
+            // deadlock-detection thread will break it.
+            e->pending_action = ACT_ACQUIRE;
+            e->action_target  = i;
+            pthread_mutex_unlock(&gs->state_mutex);
+            return;
+        }
+    }
+
+    // (3) Strike / skip.
     int alive[MAX_PLAYERS]; int n = 0;
     for (int i = 0; i < MAX_PLAYERS; ++i)
         if (gs->players[i].active && gs->players[i].alive) alive[n++] = i;
@@ -98,7 +132,6 @@ void npc_decide(GameState *gs, Entity *e) {
         return;
     }
     int target = alive[rand_range(0, n - 1)];
-    // 85% strike, 15% skip
     if (rand_range(0, 99) < 85) {
         e->pending_action = ACT_STRIKE;
         e->action_target  = target;

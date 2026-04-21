@@ -25,15 +25,26 @@ press one of:
 |-----|--------|
 | s | Strike — prompts for a target enemy index |
 | x | Exhaust — drains target enemy stamina |
-| w | Use weapon — pick a weapon instance and a target |
+| w | Use weapon — pick a weapon instance and a target. Using an artifact weapon (Solar Core / Lunar Blade / Eclipse Relic) stuns the target for 3 s. |
 | i | Swap-in from long-term storage |
 | h | Heal 10% of max HP |
-| u | Ultimate ability (requires Solar Core + Lunar Blade) |
+| u | Ultimate ability (requires holding BOTH Solar Core AND Lunar Blade). Triggers `SIGSTOP` on the ASP process for 10 s; `SIGALRM` in the arbiter resumes it. |
+| a | Acquire an artifact (1=Solar Core, 2=Lunar Blade, 3=Eclipse Relic). Registers you as a waiter if already held — this is how circular waits arise for the deadlock detector. |
+| r | Release an artifact you hold (frees the resource + evicts it from inventory). |
 | k | Skip (keeps 50% stamina) |
 | q | Quit (sends SIGTERM to the arbiter) |
 
 When an enemy dies and drops a weapon, any alive player is offered the pickup
 with `y/n` — declining lets an enemy grab it.
+
+## Turnaround analysis
+
+At shutdown the arbiter writes two files next to the binary (cwd):
+
+* `chrono_rift_trace.csv` — per-turn event log (`t_ns,event,entity,action=…`) suitable for plotting in the `report.pdf`.
+* `chrono_rift_summary.txt` — per-entity summary: turns taken, average wait-to-act ms, average burst ms, totals.
+
+The same summary is also echoed to `stderr` right before the arbiter unlinks the shared-memory segment, so you can copy-paste it into the report directly.
 
 ## Seed
 

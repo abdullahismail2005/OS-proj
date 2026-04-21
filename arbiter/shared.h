@@ -37,6 +37,7 @@
 #define ULTIMATE_PAUSE_SEC   10
 
 #define KILL_GOAL        10       // win condition: kill this many enemies
+#define DROP_PICKUP_WINDOW_SEC 5  // players' window to accept a dropped weapon
 
 // ---------- Enums ----------
 enum GamePhase {
@@ -56,8 +57,10 @@ enum ActionType {
     ACT_HEAL       = 5,
     ACT_SKIP       = 6,
     ACT_ULTIMATE   = 7,
-    ACT_PICKUP     = 8,   // pick up dropped weapon / Eclipse Relic
-    ACT_DECLINE    = 9
+    ACT_PICKUP     = 8,   // pick up dropped weapon
+    ACT_DECLINE    = 9,
+    ACT_ACQUIRE    = 10,  // try to lock an artifact (action_target = artifact idx 0/1/2)
+    ACT_RELEASE    = 11   // release an artifact
 };
 
 enum WeaponId {
@@ -146,6 +149,14 @@ struct Entity {
                               // player attack, player index for NPC attack)
     int  action_param;        // weapon instance id / LTS index / etc.
     sem_t action_ready;       // posted by entity; waited on by arbiter
+
+    // Turnaround analytics (used by the arbiter for the report.pdf summary).
+    // Filled while the scheduler wakes / an entity commits an action.
+    int  turns_taken;
+    long long total_wait_ns;    // total ns spent at full stamina waiting for turn
+    long long total_burst_ns;   // total ns spent actually "on turn"
+    long long last_full_at_ns;  // set when stamina first hit max this cycle
+    long long last_turn_start_ns;
 };
 
 // ---------- Artifacts ----------
@@ -193,9 +204,11 @@ struct GameState {
     // Artifact table
     ArtifactSlot artifacts[NUM_ARTIFACTS];
 
-    // Weapon-drop state (after an enemy dies)
+    // Weapon-drop state (after an enemy dies). `pending_drop_open` lets any
+    // alive player grab it on their turn; on decline / turn-miss an NPC
+    // picks it up per spec.
     int   pending_drop_weapon;       // 0 if none
-    int   pending_drop_for_player;   // player local_id offered the pickup
+    int   pending_drop_open;         // 1 = offer still open to any player
     time_t pending_drop_deadline;
 
     // Ultimate-ability state (for renderer/log only; enforcement is via
