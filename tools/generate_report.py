@@ -16,9 +16,12 @@ import re
 import sys
 from collections import defaultdict
 
+import glob
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
 from matplotlib.backends.backend_pdf import PdfPages
 
 
@@ -499,6 +502,126 @@ def tui_snapshot_page(pdf, demo_log_path=None):
     plt.close(fig)
 
 
+SCREENSHOT_CAPTIONS = {
+    "01-hud-initial.png":
+        "Initial HUD just after arbiter forks hip + asp. Cyan player rows "
+        "(P1/P2), red enemy rows (E1..E7), green HP bars, cyan stamina bars, "
+        "green artifact table (Solar Core, Lunar Blade, Eclipse Relic absent "
+        "until dropped). Log pane on the right is already reporting that the "
+        "asp spawned 7 NPC threads and hip spawned 2 player threads.",
+    "02-active-turn-P2.png":
+        "P2 is now the active entity. The '*' marker is drawn next to P2's "
+        "name and the row is highlighted in yellow. Log shows the scheduler "
+        "picked P1 first, P1 timed out so the turn was auto-skipped, then P2 "
+        "was picked next (FIFO on stamina-arrival as per §3). Enemies' stamina "
+        "is still accruing at their individual speeds.",
+    "03-artifact-acquired.png":
+        "P2 locked the Solar Core. The artifact table now reads 'Solar Core: "
+        "held by P2 (waiters=0)' in yellow, and the log gained an [ACQ] P2 "
+        "LOCKED Solar Core entry. This is the resource table from §7 being "
+        "driven through the shared memory segment under the artifact mutex.",
+    "04-both-artifacts-held.png":
+        "P2 now holds both Solar Core AND Lunar Blade. Both entries in the "
+        "artifact table read 'held by P2'. This is the eligibility "
+        "precondition for the Ultimate Ability (§8): a player may only trigger "
+        "Ultimate while both artifacts are simultaneously in their primary "
+        "inventory.",
+    "05-ultimate-banner.png":
+        "Ultimate Ability triggered by P2. The magenta banner at the top of "
+        "the HUD reads '*** ULTIMATE ACTIVE (10s) ... ASP SIGSTOPped ***' — "
+        "the arbiter sent SIGSTOP to the asp process, armed a 10 s SIGALRM, "
+        "and dealt 200 dmg to every alive enemy. Log shows five [ULT] rows "
+        "applying damage, three [DEATH] rows (E1, E6, E7), two [DROP] rows "
+        "(Splinter Stick, Venom Dagger) and [ARTIFACT] Eclipse Relic has "
+        "appeared — Eclipse Relic is introduced dynamically at run-time per "
+        "§7.",
+    "06-weapon-use-kill-drop.png":
+        "P2 uses the Solar Core as a weapon. The log shows [USE] P2 wields "
+        "Solar Core (95 dmg), [HIT] P2 -> E2 for 95 dmg, [DEATH] E2 has "
+        "fallen, [DROP] E2 dropped Thunderstaff. Immediately after, [ACQ] E4 "
+        "LOCKED Eclipse Relic — an NPC grabbed the Relic, demonstrating that "
+        "the asp threads contend for artifacts symmetrically with players. "
+        "The artifact table now shows 'Eclipse Relic: held by E4' in yellow, "
+        "which would enter the waits-for graph if any player subsequently "
+        "acquired it (§7 deadlock detector).",
+}
+
+
+def screenshots_page(pdf, png_paths):
+    """Embed one screenshot per page with its caption underneath."""
+    if not png_paths:
+        return
+
+    intro = plt.figure(figsize=(11.69, 8.27))  # A4 landscape
+    ax = intro.add_subplot(111)
+    ax.axis("off")
+    ax.text(0.06, 0.95, "Live TUI evidence", fontsize=18, fontweight="bold",
+            transform=ax.transAxes, va="top")
+    ax.text(0.06, 0.88,
+            "The following pages are screenshots captured while driving the "
+            "interactive ncurses build (not --demo mode) with the roll-number "
+            "seed 240673 and 2 players on an Ubuntu 22.04 VM. Each image "
+            "corresponds to a distinct spec requirement from §1\u2013§10. The "
+            "screenshots back up the text-render snapshot page above and "
+            "demonstrate that the colored HUD, the artifact table, the "
+            "signal-driven Ultimate mechanic, and the action log all render "
+            "correctly end-to-end.",
+            fontsize=10, family="sans-serif", transform=ax.transAxes, va="top",
+            wrap=True)
+    lines = []
+    for i, p in enumerate(png_paths, 1):
+        name = os.path.basename(p)
+        caption = SCREENSHOT_CAPTIONS.get(name, "")
+        short = caption.split(".")[0] + "." if caption else name
+        lines.append(f"  {i}. {name}\n     {short}")
+    ax.text(0.06, 0.68, "\n\n".join(lines), fontsize=8, family="monospace",
+            transform=ax.transAxes, va="top")
+    pdf.savefig(intro)
+    plt.close(intro)
+
+    for path in png_paths:
+        name = os.path.basename(path)
+        caption = SCREENSHOT_CAPTIONS.get(name, name)
+        try:
+            img = mpimg.imread(path)
+        except Exception as e:
+            print(f"warning: could not read {path}: {e}", file=sys.stderr)
+            continue
+        fig = plt.figure(figsize=(11.69, 8.27))
+        ax_img = fig.add_axes([0.03, 0.28, 0.94, 0.68])
+        ax_img.imshow(img)
+        ax_img.set_xticks([])
+        ax_img.set_yticks([])
+        for spine in ax_img.spines.values():
+            spine.set_edgecolor("#bbbbbb")
+        ax_cap = fig.add_axes([0.03, 0.03, 0.94, 0.22])
+        ax_cap.axis("off")
+        ax_cap.text(0.0, 1.0, name, fontsize=11, fontweight="bold",
+                    transform=ax_cap.transAxes, va="top", family="monospace")
+        ax_cap.text(0.0, 0.82, caption, fontsize=9, transform=ax_cap.transAxes,
+                    va="top", wrap=True)
+        pdf.savefig(fig)
+        plt.close(fig)
+
+
+def _expand_screenshot_paths(paths):
+    """Accept either a directory or a list of files / globs."""
+    out = []
+    for p in paths:
+        if os.path.isdir(p):
+            out.extend(sorted(glob.glob(os.path.join(p, "*.png"))))
+        else:
+            out.extend(sorted(glob.glob(p)))
+    # dedupe, preserve order
+    seen = set()
+    result = []
+    for p in out:
+        if p not in seen:
+            seen.add(p)
+            result.append(p)
+    return result
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--trace", default="chrono_rift_trace.csv")
@@ -506,6 +629,9 @@ def main():
     ap.add_argument("--out", default="report.pdf")
     ap.add_argument("--demo-log", default=None,
                     help="optional path to arbiter stderr log (for TUI snapshot)")
+    ap.add_argument("--screenshots", nargs="*", default=None,
+                    help="directory or list of PNG screenshots to embed "
+                         "(one PNG per page + a title page)")
     args = ap.parse_args()
 
     if not os.path.exists(args.trace):
@@ -525,6 +651,8 @@ def main():
         per_entity_detail_page(pdf, summary, per_entity)
         mechanics_page(pdf)
         tui_snapshot_page(pdf, args.demo_log)
+        if args.screenshots:
+            screenshots_page(pdf, _expand_screenshot_paths(args.screenshots))
         narrative_page(pdf, summary, meta, per_entity)
 
     print(f"wrote {args.out} ({os.path.getsize(args.out)} bytes)")

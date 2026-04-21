@@ -4,3 +4,8 @@ chrono_rift_trace.csv
 chrono_rift_summary.txt
 # report.pdf is committed (submission artifact). Regenerate with:
 #   python3 tools/generate_report.py --demo-log arbiter.log
+
+# test artifacts (not part of submission)
+tui-screenshot-plan.md
+arbiter.log
+
