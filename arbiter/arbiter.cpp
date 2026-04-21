@@ -708,6 +708,7 @@ int main(int argc, char **argv) {
     }
 
     bool demo = false;
+    bool multiplayer = false;
     int demo_turns = 30;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -715,9 +716,15 @@ int main(int argc, char **argv) {
         else if (a == "--players" && i + 1 < argc) num_players = std::atoi(argv[++i]);
         else if (a == "--demo") demo = true;
         else if (a == "--demo-turns" && i + 1 < argc) demo_turns = std::atoi(argv[++i]);
+        else if (a == "--multiplayer") multiplayer = true;
     }
 
     if (demo && num_players < 1) num_players = 2;  // default 2-player demo
+    if (multiplayer && num_players < 2) num_players = 2;  // MP implies >=2 humans
+    if (multiplayer && demo) {
+        fprintf(stderr, "[arbiter] --multiplayer is incompatible with --demo; ignoring --demo\n");
+        demo = false;
+    }
 
     if (num_players < 1 || num_players > MAX_PLAYERS) {
         fprintf(stderr, "Select party size [1-%d]: ", MAX_PLAYERS);
@@ -744,20 +751,45 @@ int main(int argc, char **argv) {
     init_game_state(gs, seed, num_players);
     gs->demo_mode = demo ? 1 : 0;
     gs->demo_max_turns = demo_turns;
+    gs->multiplayer_mode = multiplayer ? 1 : 0;
+    for (int i = 0; i < MAX_PLAYERS; ++i) { gs->joined[i] = 0; gs->hip_pids[i] = 0; }
     install_signals();
 
-    fprintf(stderr, "[arbiter] pid=%d seed=%d players=%d enemies=%d — launching hip/asp\n",
-            getpid(), seed, num_players, gs->num_enemies);
+    fprintf(stderr, "[arbiter] pid=%d seed=%d players=%d enemies=%d%s\n",
+            getpid(), seed, num_players, gs->num_enemies,
+            multiplayer ? " — MULTIPLAYER MODE" : " — launching hip/asp");
 
     // Launch asp first so it's ready to receive stun signals.
     pid_t asp_pid = launch_child("asp");
-    pid_t hip_pid = launch_child("hip");
     gs->asp_pid = asp_pid;
-    gs->hip_pid = hip_pid;
+
+    pid_t hip_pid = 0;
+    if (!multiplayer) {
+        hip_pid = launch_child("hip");
+        gs->hip_pid = hip_pid;
+    } else {
+        // In MP we stay in PHASE_SETUP until every active slot has joined.
+        fprintf(stderr,
+            "[arbiter] waiting for %d hip clients to join. Run in separate terminals:\n",
+            num_players);
+        for (int i = 0; i < num_players; ++i) {
+            fprintf(stderr, "    ./build/hip --join %d\n", i);
+        }
+        while (!G_shutdown.load()) {
+            bool all = true;
+            for (int i = 0; i < num_players; ++i) {
+                if (gs->players[i].active && !gs->joined[i]) { all = false; break; }
+            }
+            if (all) break;
+            struct timespec t { 0, 100'000'000 }; nanosleep(&t, nullptr);
+        }
+        fprintf(stderr, "[arbiter] all hip clients joined — starting game\n");
+    }
 
     gs->phase = PHASE_RUNNING;
-    shm_log(gs, "Game started. seed=%d players=%d enemies=%d",
-            seed, num_players, gs->num_enemies);
+    shm_log(gs, "Game started. seed=%d players=%d enemies=%d%s",
+            seed, num_players, gs->num_enemies,
+            multiplayer ? " [MULTIPLAYER]" : "");
 
     // Deadlock-detection background thread
     pthread_t dl_tid;
@@ -778,11 +810,18 @@ int main(int argc, char **argv) {
 
     if (asp_pid > 0) { kill(asp_pid, SIGCONT); kill(asp_pid, SIGTERM); }
     if (hip_pid > 0) kill(hip_pid, SIGTERM);
+    // In MP the arbiter didn't fork the hip processes, but we know their pids
+    // from the join handshake — signal each so they can tear down cleanly.
+    if (multiplayer) {
+        for (int i = 0; i < MAX_PLAYERS; ++i)
+            if (gs->hip_pids[i] > 0) kill(gs->hip_pids[i], SIGTERM);
+    }
 
     pthread_join(dl_tid, nullptr);
 
     waitpid(asp_pid, nullptr, 0);
-    waitpid(hip_pid, nullptr, 0);
+    if (hip_pid > 0) waitpid(hip_pid, nullptr, 0);
+    // MP hips are children of the user's shell, not us — nothing to waitpid on.
 
     fprintf(stderr, "[arbiter] game ended with phase=%d\n", final_phase);
 

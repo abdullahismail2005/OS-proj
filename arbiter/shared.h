@@ -191,6 +191,15 @@ struct GameState {
     int   demo_mode;   // 1 = headless scripted demo (no ncurses in hip)
     int   demo_max_turns; // total player turns before forcing quit in demo
 
+    // ---- §11 local-multiplayer ----
+    // 1 = arbiter launched with --multiplayer and does NOT fork hip; each
+    // human runs `./hip --join <slot>` in their own terminal and the slot
+    // flips joined[slot]=1 once attached. Arbiter waits for all active
+    // slots before moving phase -> RUNNING.
+    int   multiplayer_mode;
+    int   joined[MAX_PLAYERS];
+    pid_t hip_pids[MAX_PLAYERS];   // per-slot hip pid in multiplayer_mode
+
     // Process ids (populated by each process on startup).
     pid_t arbiter_pid;
     pid_t hip_pid;

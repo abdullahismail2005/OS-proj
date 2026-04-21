@@ -29,6 +29,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <ncurses.h>
+#include <string>
 
 namespace {
 
@@ -506,7 +507,17 @@ void *text_render_thread(void *arg) {
 
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
+    // §11: local-multiplayer join mode. When --join <slot> is passed, this
+    // hip process owns exactly that player slot (others are handled by
+    // peer hip processes in their own terminals). Without --join, hip runs
+    // as the arbiter-forked single-hip that handles every active slot.
+    int join_slot = -1;
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--join" && i + 1 < argc) join_slot = std::atoi(argv[++i]);
+    }
+
     sigset_t block;
     sigemptyset(&block);
     sigaddset(&block, SIGUSR2);
@@ -517,9 +528,32 @@ int main() {
     GameState *gs = shm_open_gamestate(false);
     if (!gs) { fprintf(stderr, "[hip] shared memory not available\n"); return 1; }
     G_gs = gs;
-    gs->hip_pid = getpid();
 
-    // Wait for arbiter to move to RUNNING.
+    if (join_slot >= 0) {
+        if (join_slot >= MAX_PLAYERS || !gs->multiplayer_mode) {
+            fprintf(stderr,
+                "[hip] --join requires arbiter to be running with --multiplayer "
+                "and slot in [0,%d]\n", MAX_PLAYERS - 1);
+            return 2;
+        }
+        if (!gs->players[join_slot].active) {
+            fprintf(stderr, "[hip] slot %d is not an active player\n", join_slot);
+            return 2;
+        }
+        if (gs->joined[join_slot]) {
+            fprintf(stderr, "[hip] slot %d already has a joined hip (pid %d)\n",
+                    join_slot, gs->hip_pids[join_slot]);
+            return 2;
+        }
+        gs->hip_pids[join_slot] = getpid();
+        gs->joined[join_slot] = 1;
+        fprintf(stderr, "[hip] joined as player slot %d (pid %d)\n",
+                join_slot, getpid());
+    } else {
+        gs->hip_pid = getpid();
+    }
+
+    // Wait for arbiter to move to RUNNING (in MP, it blocks on joined[]).
     while (gs->phase == PHASE_SETUP && !G_shutdown.load()) {
         struct timespec t { 0, 100'000'000 };
         nanosleep(&t, nullptr);
@@ -543,11 +577,14 @@ int main() {
     int spawned = 0;
     for (int i = 0; i < MAX_PLAYERS; ++i) {
         if (!gs->players[i].active) continue;
+        // In MP, each hip owns exactly one slot — skip every other slot.
+        if (join_slot >= 0 && i != join_slot) continue;
         gs->players[i].host_pid = getpid();
         pthread_create(&p_tids[spawned++], nullptr, player_thread,
                        reinterpret_cast<void *>((intptr_t)i));
     }
-    shm_log(gs, "[hip] %d player threads running", spawned);
+    shm_log(gs, "[hip] %d player thread(s) running%s", spawned,
+            join_slot >= 0 ? " [MP]" : "");
 
     while (!G_shutdown.load() && gs->phase == PHASE_RUNNING) {
         struct timespec t { 0, 250'000'000 };

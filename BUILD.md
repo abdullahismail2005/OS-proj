@@ -64,6 +64,42 @@ deterministic:
 * `--demo-turns N` force-quits once the total player-turn count reaches
   N. Use this to cap runtime.
 
+## §11 Local Multiplayer Bonus
+
+Two humans on the same machine, each driving one player from their own
+terminal window. Both hip processes attach to the same POSIX shared-memory
+segment — no networking needed.
+
+### Terminal A — arbiter
+```bash
+./build/arbiter --seed 240673 --players 2 --multiplayer
+# [arbiter] waiting for 2 hip clients to join. Run in separate terminals:
+#     ./build/hip --join 0
+#     ./build/hip --join 1
+```
+The arbiter stays in `PHASE_SETUP`, forks `asp`, and spins on a
+`joined[]` barrier until every active player slot has an attached hip.
+
+### Terminal B — Player 1
+```bash
+./build/hip --join 0
+```
+
+### Terminal C — Player 2
+```bash
+./build/hip --join 1
+```
+
+Each hip process runs its own ncurses renderer in its own terminal, so
+both players get a full, independently-updating HUD. Only the slot you
+joined accepts input; on the other terminal, your slot's name will glow
+yellow when it's your turn. On quit (`q`) from any hip, that hip's
+SIGTERM is sent to the arbiter which tears down the whole session.
+
+The spec (§11) explicitly calls for "Local Multiplayer Mode where two
+separate human-controlled processes compete" — this is that, with zero
+impact on the default single-hip grading path.
+
 ## Generating `report.pdf`
 
 ```bash
@@ -126,6 +162,7 @@ repository owner's roll number); swap it per your own roll when grading.
 | Roll-number seed | `--seed` CLI (default 240673) |
 | Scripted / headless demo | `--demo` / `--demo-turns` in `arbiter.cpp` |
 | Turnaround analysis PDF | `tools/generate_report.py` |
+| §11 Local Multiplayer Bonus | `--multiplayer` (arbiter) + `--join <slot>` (hip) |
 
 ## Known deviations from the Docker guide template
 
