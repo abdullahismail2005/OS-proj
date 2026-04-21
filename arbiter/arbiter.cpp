@@ -178,29 +178,25 @@ void init_game_state(GameState *gs, int seed, int num_players) {
 
 // ---------- Scheduler ----------
 
-// Chooses next active entity: first alive, non-stunned, full-stamina entity.
-// Returns global id or -1.
+// Chooses next active entity: the one that became stamina-full earliest
+// (spec §3: "Only the first entity to reach a full capacity threshold is
+// permitted to act"). Ties broken by global id. Returns global id or -1.
 int scheduler_pick(GameState *gs) {
     int pick = -1;
-    for (int i = 0; i < MAX_PLAYERS; ++i) {
-        Entity &e = gs->players[i];
-        if (!e.active || !e.alive) continue;
-        if (e.stunned) continue;
-        if (e.stamina >= e.max_stamina) {
-            pick = entity_global_id(1, i);
-            break;
+    long long best_full = 0;
+    auto consider = [&](const Entity &e, int gid) {
+        if (!e.active || !e.alive || e.stunned) return;
+        if (e.stamina < e.max_stamina) return;
+        long long t = e.last_full_at_ns;
+        if (pick < 0 || (t > 0 && (best_full == 0 || t < best_full))) {
+            pick = gid;
+            best_full = t;
         }
-    }
-    if (pick >= 0) return pick;
-    for (int i = 0; i < MAX_ENEMIES; ++i) {
-        Entity &e = gs->enemies[i];
-        if (!e.active || !e.alive) continue;
-        if (e.stunned) continue;
-        if (e.stamina >= e.max_stamina) {
-            pick = entity_global_id(0, i);
-            break;
-        }
-    }
+    };
+    for (int i = 0; i < MAX_PLAYERS; ++i)
+        consider(gs->players[i], entity_global_id(1, i));
+    for (int i = 0; i < MAX_ENEMIES; ++i)
+        consider(gs->enemies[i], entity_global_id(0, i));
     return pick;
 }
 
@@ -213,6 +209,16 @@ void handle_entity_death(GameState *gs, Entity *dead);
 
 void scheduler_tick(GameState *gs) {
     pthread_mutex_lock(&gs->state_mutex);
+
+    // Enforce the spec's 1 Hz stamina-accrual rate. The scheduler loop wakes
+    // more often than once a second so we can check for action-ready / stun
+    // expiry promptly, but stamina must only tick forward once per wall-clock
+    // second per §3 ("Each second the entity's speed is added to its current
+    // stamina").
+    static long long last_tick_ns = 0;
+    long long t_now_ns = now_ns();
+    bool do_accrual = (t_now_ns - last_tick_ns) >= 1'000'000'000LL;
+    if (do_accrual) last_tick_ns = t_now_ns;
 
     // Clear expired stuns
     time_t now = time(nullptr);
@@ -245,7 +251,7 @@ void scheduler_tick(GameState *gs) {
             e.last_full_at_ns = now_ns();
         }
     };
-    if (gs->active_global < 0) {
+    if (gs->active_global < 0 && do_accrual) {
         for (int i = 0; i < MAX_PLAYERS; ++i) accrue(gs->players[i]);
         for (int i = 0; i < MAX_ENEMIES; ++i) accrue(gs->enemies[i]);
     }
@@ -354,6 +360,17 @@ void scheduler_loop(GameState *gs) {
             if (gs->enemies_killed >= KILL_GOAL) {
                 gs->phase = PHASE_WIN;
                 G_shutdown.store(true);
+            }
+            // Demo mode auto-quit after N total player turns — guarantees
+            // reproducible runs for the report regardless of combat outcome.
+            if (gs->demo_mode && gs->demo_max_turns > 0) {
+                int total = 0;
+                for (int i = 0; i < MAX_PLAYERS; ++i)
+                    total += gs->players[i].turns_taken;
+                if (total >= gs->demo_max_turns) {
+                    gs->phase = PHASE_QUIT;
+                    G_shutdown.store(true);
+                }
             }
             pthread_mutex_unlock(&gs->state_mutex);
         }
@@ -690,11 +707,17 @@ int main(int argc, char **argv) {
                                                  : argv0.substr(0, slash);
     }
 
+    bool demo = false;
+    int demo_turns = 30;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--seed" && i + 1 < argc)        seed = std::atoi(argv[++i]);
         else if (a == "--players" && i + 1 < argc) num_players = std::atoi(argv[++i]);
+        else if (a == "--demo") demo = true;
+        else if (a == "--demo-turns" && i + 1 < argc) demo_turns = std::atoi(argv[++i]);
     }
+
+    if (demo && num_players < 1) num_players = 2;  // default 2-player demo
 
     if (num_players < 1 || num_players > MAX_PLAYERS) {
         fprintf(stderr, "Select party size [1-%d]: ", MAX_PLAYERS);
@@ -719,6 +742,8 @@ int main(int argc, char **argv) {
     G_gs = gs;
 
     init_game_state(gs, seed, num_players);
+    gs->demo_mode = demo ? 1 : 0;
+    gs->demo_max_turns = demo_turns;
     install_signals();
 
     fprintf(stderr, "[arbiter] pid=%d seed=%d players=%d enemies=%d — launching hip/asp\n",

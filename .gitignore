@@ -1,2 +1,5 @@
 build/
 *.o
+chrono_rift_trace.csv
+chrono_rift_summary.txt
+report.pdf

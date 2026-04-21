@@ -46,6 +46,36 @@ At shutdown the arbiter writes two files next to the binary (cwd):
 
 The same summary is also echoed to `stderr` right before the arbiter unlinks the shared-memory segment, so you can copy-paste it into the report directly.
 
+## Scripted demo (for reproducible grading runs)
+
+`--demo` enables headless scripted play so the trace / summary / report are
+deterministic:
+
+```bash
+./build/arbiter --seed 240673 --players 2 --demo --demo-turns 30
+```
+
+* No ncurses — a text snapshot is emitted to `stderr` every ~2 s.
+* Player 1's script: acquire Solar Core → acquire Lunar Blade → Ultimate
+  → strike loop. This exercises artifact contention, the deadlock
+  detector (when enemies also try to grab), and the Ultimate SIGSTOP /
+  SIGCONT mechanic in deterministic order.
+* Player 2+ script: heal every 5th turn, otherwise strike.
+* `--demo-turns N` force-quits once the total player-turn count reaches
+  N. Use this to cap runtime.
+
+## Generating `report.pdf`
+
+```bash
+./build/arbiter --seed 240673 --players 2 --demo --demo-turns 30
+python3 tools/generate_report.py      # reads the two files above
+# → report.pdf (5 pages: cover, turnaround bars, Gantt, action histogram, analysis)
+```
+
+Requires `matplotlib` (already in the Docker image's `requirements.txt`
+once you `pip install matplotlib` inside the container — the image is
+minimal by design).
+
 ## Seed
 
 Pass `--seed <NNNNNN>` to override the roll-number seed used for all stat
@@ -67,6 +97,7 @@ repository owner's roll number); swap it per your own roll when grading.
 │   └── resources.h             artifact table + deadlock detector
 ├── hip/hip.cpp                 human input + ncurses renderer
 ├── asp/asp.cpp                 NPC threads
+├── tools/generate_report.py    matplotlib-only report.pdf generator
 ├── PROJECT_BRIEF.txt           original project statement (renamed from
 │                               requirements.txt to free that filename for
 │                               the Dockerfile's apt requirements list)
@@ -93,6 +124,8 @@ repository owner's roll number); swap it per your own roll when grading.
 | Inventory 20 slots, first-fit, LTS | `inventory.h` |
 | Async rendering thread | `render_thread` in `hip` |
 | Roll-number seed | `--seed` CLI (default 240673) |
+| Scripted / headless demo | `--demo` / `--demo-turns` in `arbiter.cpp` |
+| Turnaround analysis PDF | `tools/generate_report.py` |
 
 ## Known deviations from the Docker guide template
 

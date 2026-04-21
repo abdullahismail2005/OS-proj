@@ -188,6 +188,8 @@ struct GameState {
     int   num_players;
     int   num_enemies;
     int   enemies_killed;
+    int   demo_mode;   // 1 = headless scripted demo (no ncurses in hip)
+    int   demo_max_turns; // total player turns before forcing quit in demo
 
     // Process ids (populated by each process on startup).
     pid_t arbiter_pid;

@@ -79,87 +79,175 @@ void install_signals() {
 }
 
 // ---------- Rendering ----------
-void draw_bar(int y, int x, int w, int cur, int max, const char *label) {
+// ---------- Color pair ids ----------
+enum {
+    CP_DEFAULT = 0,
+    CP_HEADER  = 1,
+    CP_PLAYER  = 2,
+    CP_ENEMY   = 3,
+    CP_STUN    = 4,   // red-on-black
+    CP_DEAD    = 5,   // dim
+    CP_ACTIVE  = 6,   // yellow (whose turn it is)
+    CP_ULTI    = 7,   // magenta banner
+    CP_HP_BAR  = 8,   // green bar
+    CP_ST_BAR  = 9,   // cyan bar
+    CP_LOG_WARN = 10, // red log entries
+    CP_LOG_INFO = 11, // green log entries
+    CP_LOG_GOLD = 12, // yellow (ULT, HIT)
+};
+
+void init_colors() {
+    if (!has_colors()) return;
+    start_color();
+    use_default_colors();
+    init_pair(CP_HEADER,   COLOR_WHITE,   -1);
+    init_pair(CP_PLAYER,   COLOR_CYAN,    -1);
+    init_pair(CP_ENEMY,    COLOR_RED,     -1);
+    init_pair(CP_STUN,     COLOR_RED,     -1);
+    init_pair(CP_DEAD,     COLOR_BLACK,   -1);
+    init_pair(CP_ACTIVE,   COLOR_YELLOW,  -1);
+    init_pair(CP_ULTI,     COLOR_MAGENTA, -1);
+    init_pair(CP_HP_BAR,   COLOR_GREEN,   -1);
+    init_pair(CP_ST_BAR,   COLOR_CYAN,    -1);
+    init_pair(CP_LOG_WARN, COLOR_RED,     -1);
+    init_pair(CP_LOG_INFO, COLOR_GREEN,   -1);
+    init_pair(CP_LOG_GOLD, COLOR_YELLOW,  -1);
+}
+
+void draw_bar(int y, int x, int w, int cur, int max,
+              const char *label, int color_pair) {
     mvprintw(y, x, "%-12s", label);
     int filled = (max > 0) ? (cur * w / max) : 0;
     if (filled < 0) filled = 0;
     if (filled > w) filled = w;
     mvaddch(y, x + 13, '[');
+    if (color_pair) attron(COLOR_PAIR(color_pair));
     for (int i = 0; i < w; ++i) mvaddch(y, x + 14 + i, i < filled ? '#' : '-');
+    if (color_pair) attroff(COLOR_PAIR(color_pair));
     mvaddch(y, x + 14 + w, ']');
     mvprintw(y, x + 14 + w + 2, "%5d/%-5d", cur, max);
+}
+
+// Pick a log color based on the bracketed tag at the start of the message.
+int log_color(const char *msg) {
+    if (!msg || msg[0] != '[') return 0;
+    if (strncmp(msg, "[STUN", 5)  == 0) return CP_LOG_WARN;
+    if (strncmp(msg, "[DEATH", 6) == 0) return CP_LOG_WARN;
+    if (strncmp(msg, "[DLCK", 5)  == 0) return CP_LOG_WARN;
+    if (strncmp(msg, "[ULT", 4)   == 0) return CP_LOG_GOLD;
+    if (strncmp(msg, "[HIT", 4)   == 0) return CP_LOG_GOLD;
+    if (strncmp(msg, "[USE", 4)   == 0) return CP_LOG_GOLD;
+    if (strncmp(msg, "[HEAL", 5)  == 0) return CP_LOG_INFO;
+    if (strncmp(msg, "[PICK", 5)  == 0) return CP_LOG_INFO;
+    if (strncmp(msg, "[DROP", 5)  == 0) return CP_LOG_INFO;
+    if (strncmp(msg, "[ARTI", 5)  == 0) return CP_LOG_GOLD;
+    return 0;
 }
 
 void draw_state(GameState *gs) {
     pthread_mutex_lock(&G_curses_lock);
     erase();
 
+    // Header + optional ultimate banner.
+    attron(COLOR_PAIR(CP_HEADER) | A_BOLD);
     mvprintw(0, 2, "CHRONO RIFT   seed=%d  players=%d  enemies=%d  killed=%d/%d",
              gs->seed, gs->num_players, gs->num_enemies,
              gs->enemies_killed, KILL_GOAL);
+    attroff(COLOR_PAIR(CP_HEADER) | A_BOLD);
+
+    if (gs->ultimate_active) {
+        time_t rem = gs->ultimate_until - time(nullptr);
+        if (rem < 0) rem = 0;
+        attron(COLOR_PAIR(CP_ULTI) | A_BOLD | A_BLINK);
+        mvprintw(0, 60, "*** ULTIMATE ACTIVE (%lds) — ASP SIGSTOPped ***",
+                 (long)rem);
+        attroff(COLOR_PAIR(CP_ULTI) | A_BOLD | A_BLINK);
+    }
+
+    auto render_entity = [&](Entity &e, int gid, int y, int side_pair) {
+        int attr = COLOR_PAIR(side_pair);
+        if (!e.alive) attr = COLOR_PAIR(CP_DEAD) | A_DIM;
+        else if (e.stunned) attr = COLOR_PAIR(CP_STUN) | A_BOLD;
+        else if (gs->active_global == gid) attr = COLOR_PAIR(CP_ACTIVE) | A_BOLD;
+
+        char name[48];
+        snprintf(name, sizeof(name), "%s%s%s%s",
+                 e.name,
+                 e.alive ? "" : " DEAD",
+                 e.stunned ? " STUN" : "",
+                 (gs->active_global == gid) ? " *" : "");
+        attron(attr);
+        mvprintw(y, 2, "%-14s", name);
+        attroff(attr);
+        draw_bar(y,   16, 20, e.hp,      e.max_hp,      "HP",      CP_HP_BAR);
+        draw_bar(y+1, 16, 20, e.stamina, e.max_stamina, "STAMINA", CP_ST_BAR);
+    };
 
     int y = 2;
+    attron(COLOR_PAIR(CP_PLAYER) | A_BOLD);
     mvprintw(y++, 2, "-- PLAYERS --");
+    attroff(COLOR_PAIR(CP_PLAYER) | A_BOLD);
     for (int i = 0; i < MAX_PLAYERS; ++i) {
         Entity &p = gs->players[i];
         if (!p.active) continue;
-        char name[32];
-        snprintf(name, sizeof(name), "%s%s%s",
-                 p.name,
-                 p.stunned ? " STUN" : "",
-                 (gs->active_global == entity_global_id(1, i)) ? " *" : "");
-        if (!p.alive) snprintf(name, sizeof(name), "%s DEAD", p.name);
-        mvprintw(y, 2, "%-12s", name);
-        draw_bar(y,   16, 20, p.hp,      p.max_hp,       "HP");
-        draw_bar(y+1, 16, 20, p.stamina, p.max_stamina,  "STAMINA");
+        render_entity(p, entity_global_id(1, i), y, CP_PLAYER);
         y += 3;
     }
 
     y++;
+    attron(COLOR_PAIR(CP_ENEMY) | A_BOLD);
     mvprintw(y++, 2, "-- ENEMIES --");
+    attroff(COLOR_PAIR(CP_ENEMY) | A_BOLD);
     for (int i = 0; i < MAX_ENEMIES; ++i) {
         Entity &e = gs->enemies[i];
         if (!e.active) continue;
-        char name[32];
-        snprintf(name, sizeof(name), "%s%s%s",
-                 e.name,
-                 e.stunned ? " STUN" : "",
-                 (gs->active_global == entity_global_id(0, i)) ? " *" : "");
-        if (!e.alive) snprintf(name, sizeof(name), "%s DEAD", e.name);
-        mvprintw(y, 2, "%-12s", name);
-        draw_bar(y,   16, 20, e.hp,      e.max_hp,      "HP");
-        draw_bar(y+1, 16, 20, e.stamina, e.max_stamina, "STAMINA");
+        render_entity(e, entity_global_id(0, i), y, CP_ENEMY);
         y += 3;
     }
 
-    // Artifact table
+    // Artifact table with holder name highlighted.
     y++;
+    attron(A_BOLD);
     mvprintw(y++, 2, "-- ARTIFACTS --");
+    attroff(A_BOLD);
     for (int i = 0; i < NUM_ARTIFACTS; ++i) {
         ArtifactSlot &a = gs->artifacts[i];
         const char *name = weapon_spec(a.weapon_id).name;
         if (!a.present) {
+            attron(COLOR_PAIR(CP_DEAD) | A_DIM);
             mvprintw(y++, 4, "%-16s : hidden", name);
+            attroff(COLOR_PAIR(CP_DEAD) | A_DIM);
         } else if (a.held_by_global < 0) {
+            attron(COLOR_PAIR(CP_LOG_INFO));
             mvprintw(y++, 4, "%-16s : FREE  (waiters=%d)", name, a.waiter_count);
+            attroff(COLOR_PAIR(CP_LOG_INFO));
         } else {
             Entity *h = entity_by_global(gs, a.held_by_global);
+            int pair = (a.held_by_global < MAX_PLAYERS) ? CP_PLAYER : CP_ENEMY;
+            attron(COLOR_PAIR(pair));
             mvprintw(y++, 4, "%-16s : held by %s (waiters=%d)",
                      name, h ? h->name : "?", a.waiter_count);
+            attroff(COLOR_PAIR(pair));
         }
     }
 
-    // Action log (right column)
+    // Action log (right column), colored by tag.
     int lh, lw;
     getmaxyx(stdscr, lh, lw);
     int col = lw - 62;
     if (col < 40) col = 40;
+    attron(A_BOLD);
     mvprintw(1, col, "-- LOG --");
+    attroff(A_BOLD);
     pthread_mutex_lock(&gs->log_mutex);
     int start = gs->log_count > (lh - 4) ? gs->log_count - (lh - 4) : 0;
     for (int i = start, row = 2; i < gs->log_count && row < lh - 1; ++i, ++row) {
         int idx = (gs->log_head + i) % LOG_CAPACITY;
-        mvprintw(row, col, "%.*s", lw - col - 1, gs->log[idx].msg);
+        const char *msg = gs->log[idx].msg;
+        int c = log_color(msg);
+        if (c) attron(COLOR_PAIR(c));
+        mvprintw(row, col, "%.*s", lw - col - 1, msg);
+        if (c) attroff(COLOR_PAIR(c));
     }
     pthread_mutex_unlock(&gs->log_mutex);
 
@@ -314,6 +402,46 @@ void player_turn(GameState *gs, Entity *p) {
     }
 }
 
+// Scripted, headless turn used by --demo so report.pdf runs are deterministic
+// and reproducible. Script: acquire SC -> acquire LB -> Ultimate -> strike*.
+// P2+ just strike / heal so contention and drops play out.
+void demo_player_turn(GameState *gs, Entity *p) {
+    int first_alive = -1;
+    for (int i = 0; i < MAX_ENEMIES; ++i) {
+        if (gs->enemies[i].active && gs->enemies[i].alive) {
+            first_alive = i; break;
+        }
+    }
+    int turn = p->turns_taken;      // 0-based within this entity
+    if (p->local_id == 0) {
+        // P1: artifact accumulation → Ultimate → strike loop.
+        if (turn == 0) {
+            p->pending_action = ACT_ACQUIRE;
+            p->action_target  = 0;      // Solar Core
+        } else if (turn == 1) {
+            p->pending_action = ACT_ACQUIRE;
+            p->action_target  = 1;      // Lunar Blade
+        } else if (turn == 2) {
+            p->pending_action = ACT_ULTIMATE;
+        } else if (first_alive >= 0) {
+            p->pending_action = ACT_STRIKE;
+            p->action_target  = first_alive;
+        } else {
+            p->pending_action = ACT_SKIP;
+        }
+    } else {
+        // Other players: heal every 5 turns, strike otherwise.
+        if (turn > 0 && turn % 5 == 0) {
+            p->pending_action = ACT_HEAL;
+        } else if (first_alive >= 0) {
+            p->pending_action = ACT_STRIKE;
+            p->action_target  = first_alive;
+        } else {
+            p->pending_action = ACT_SKIP;
+        }
+    }
+}
+
 void *player_thread(void *arg) {
     int idx = static_cast<int>(reinterpret_cast<intptr_t>(arg));
     Entity *p = &G_gs->players[idx];
@@ -335,10 +463,44 @@ void *player_thread(void *arg) {
         if (G_shutdown.load() || G_gs->phase != PHASE_RUNNING) break;
         if (!p->alive) break;
 
-        player_turn(G_gs, p);
+        if (G_gs->demo_mode) {
+            demo_player_turn(G_gs, p);
+        } else {
+            player_turn(G_gs, p);
+        }
         sem_post(&p->action_ready);
     }
     G_player_ready[idx] = 0;
+    return nullptr;
+}
+
+// Text renderer for --demo: writes periodic snapshots to stderr instead of
+// using ncurses. Still a dedicated thread reading only from shared memory.
+void *text_render_thread(void *arg) {
+    GameState *gs = static_cast<GameState *>(arg);
+    int ticks = 0;
+    while (!G_shutdown.load() && gs->phase == PHASE_RUNNING) {
+        if (++ticks % 20 == 0) {   // ~every 2s at 100ms sleep
+            pthread_mutex_lock(&gs->state_mutex);
+            fprintf(stderr, "[render] kills=%d/%d  active=%d\n",
+                    gs->enemies_killed, KILL_GOAL, gs->active_global);
+            for (int i = 0; i < MAX_PLAYERS; ++i) {
+                Entity &e = gs->players[i];
+                if (!e.active) continue;
+                fprintf(stderr, "  %s  hp=%d/%d stam=%d/%d %s %s turns=%d\n",
+                        e.name, e.hp, e.max_hp, e.stamina, e.max_stamina,
+                        e.alive ? "" : "DEAD", e.stunned ? "STUN" : "",
+                        e.turns_taken);
+            }
+            int alive = 0;
+            for (int i = 0; i < MAX_ENEMIES; ++i)
+                if (gs->enemies[i].active && gs->enemies[i].alive) alive++;
+            fprintf(stderr, "  enemies alive: %d\n", alive);
+            pthread_mutex_unlock(&gs->state_mutex);
+        }
+        struct timespec ts { 0, 100'000'000 };
+        nanosleep(&ts, nullptr);
+    }
     return nullptr;
 }
 
@@ -363,14 +525,19 @@ int main() {
         nanosleep(&t, nullptr);
     }
 
-    initscr();
-    cbreak();
-    noecho();
-    keypad(stdscr, TRUE);
-    curs_set(0);
+    bool demo = (gs->demo_mode != 0);
+    if (!demo) {
+        initscr();
+        cbreak();
+        noecho();
+        keypad(stdscr, TRUE);
+        curs_set(0);
+        init_colors();
+    }
 
     pthread_t r_tid;
-    pthread_create(&r_tid, nullptr, render_thread, gs);
+    pthread_create(&r_tid, nullptr,
+                   demo ? text_render_thread : render_thread, gs);
 
     pthread_t p_tids[MAX_PLAYERS];
     int spawned = 0;
@@ -391,9 +558,11 @@ int main() {
     for (int i = 0; i < spawned; ++i) pthread_join(p_tids[i], nullptr);
     pthread_join(r_tid, nullptr);
 
-    pthread_mutex_lock(&G_curses_lock);
-    endwin();
-    pthread_mutex_unlock(&G_curses_lock);
+    if (!demo) {
+        pthread_mutex_lock(&G_curses_lock);
+        endwin();
+        pthread_mutex_unlock(&G_curses_lock);
+    }
 
     const char *phase_txt =
         gs->phase == PHASE_WIN  ? "VICTORY"   :
